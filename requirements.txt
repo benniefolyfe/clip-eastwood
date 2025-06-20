@@ -1,0 +1,9 @@
+Flask
+slack_sdk
+slack_bolt
+requests
+ratelimit
+tenacity
+python-dotenv
+google-generativeai
+certifi
