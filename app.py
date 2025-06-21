@@ -11,6 +11,7 @@ import re
 from dotenv import load_dotenv
 import sqlite3
 from sqlite3 import Error
+from google.cloud import secretmanager
 import json
 import threading
 import time
@@ -20,12 +21,93 @@ from google.api_core.exceptions import ResourceExhausted
 from contextlib import contextmanager
 
 os.environ['SSL_CERT_FILE'] = certifi.where()
-load_dotenv()
 
-SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
+# Get Google Cloud Project ID from environment
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
+
+def access_secret_version(secret_id, version_id="latest", project_id=None):
+    """
+    Access the payload of the given secret version.
+    """
+    if project_id is None:
+        project_id = GOOGLE_CLOUD_PROJECT
+        if not project_id:
+            raise ValueError("Google Cloud Project ID not set. Please set GOOGLE_CLOUD_PROJECT environment variable.")
+
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
+
+    try:
+        response = client.access_secret_version(request={"name": name})
+        payload = response.payload.data.decode("UTF-8")
+        return payload
+    except Exception as e:
+        logging.error(f"Failed to access secret {secret_id}: {e}", exc_info=True)
+        # Depending on the secret, you might want to raise the error or return None
+        # For critical secrets like tokens, raising an error might be better to halt execution.
+        raise  # Re-raise the exception to make it clear that secret fetching failed.
+
+# Load secrets from Secret Manager
+# For multi-tenancy, these would be dynamically determined, perhaps using a workspace_id.
+# For now, we use a placeholder or default. In a real multi-tenant app,
+# you'd fetch SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET based on the incoming request's team_id.
+# GEMINI_API_KEY might be global or per-tenant. SLACK_APP_TOKEN is usually global for Socket Mode.
+
+# It's good practice to define secret IDs as constants
+SLACK_SIGNING_SECRET_ID = "SLACK_SIGNING_SECRET"
+GEMINI_API_KEY_ID = "GEMINI_API_KEY"
+SLACK_BOT_TOKEN_ID = "SLACK_BOT_TOKEN"
+SLACK_APP_TOKEN_ID = "SLACK_APP_TOKEN" # Typically used for Socket Mode connection
+
+try:
+    # Attempt to load GOOGLE_CLOUD_PROJECT first if not already set (e.g. local testing without .env for this var)
+    if not GOOGLE_CLOUD_PROJECT:
+        load_dotenv() # Load .env for local development if GOOGLE_CLOUD_PROJECT is not set
+        GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT") # Try loading from .env
+
+    # If GOOGLE_CLOUD_PROJECT is still not set, it means we are likely in an environment
+    # where it should have been provided (like Cloud Run) or local dev is misconfigured.
+    if not GOOGLE_CLOUD_PROJECT:
+        logging.warning("GOOGLE_CLOUD_PROJECT environment variable not found. Secret fetching will likely fail if not running locally with application default credentials.")
+        # For local development where ADC is set up, project_id might be inferred by the client library.
+        # However, explicitly setting it is safer.
+        # If you still want to try to load other secrets from .env for local dev:
+        load_dotenv() # Ensure .env is loaded for local fallback
+        SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+        SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
+        if not all([SLACK_SIGNING_SECRET, GEMINI_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN]):
+            logging.error("Failed to load secrets from .env file as a fallback during local development.")
+            # Decide on behavior: raise error, or try to continue (might fail later)
+            # For now, let it try to continue, it will fail when Slack clients are initialized if tokens are None.
+    else:
+        # Productive path: Load secrets from Google Cloud Secret Manager
+        SLACK_SIGNING_SECRET = access_secret_version(SLACK_SIGNING_SECRET_ID)
+        GEMINI_API_KEY = access_secret_version(GEMINI_API_KEY_ID)
+        SLACK_BOT_TOKEN = access_secret_version(SLACK_BOT_TOKEN_ID)
+        SLACK_APP_TOKEN = access_secret_version(SLACK_APP_TOKEN_ID) # For Socket Mode
+
+except Exception as e:
+    logging.error(f"Critical error during secret initialization: {e}", exc_info=True)
+    # Fallback for local development if Secret Manager access fails (e.g. no auth, wrong project)
+    # This helps in local testing without full cloud setup, but ensure GOOGLE_CLOUD_PROJECT is NOT set
+    # or this block won't be hit as intended if GOOGLE_CLOUD_PROJECT is set but SM access fails.
+    if not GOOGLE_CLOUD_PROJECT: # Only try .env if GOOGLE_CLOUD_PROJECT was never set (true local dev)
+        logging.info("Attempting to load secrets from .env file for local development due to Secret Manager access failure.")
+        load_dotenv()
+        SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+        SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
+        if not all([SLACK_SIGNING_SECRET, GEMINI_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN]):
+            logging.error("Failed to load secrets from .env file as a fallback. Application may not work.")
+            # Consider raising an exception here if secrets are absolutely critical for startup
+    else:
+        # If GOOGLE_CLOUD_PROJECT was set, it implies a cloud environment or intentional local test with SM.
+        # Failure here is more critical.
+        raise RuntimeError(f"Failed to initialize secrets from Secret Manager and GOOGLE_CLOUD_PROJECT was set. Error: {e}")
+
 
 # Global variables
 SEARCH_LIMIT = 3000 # Max messages to search

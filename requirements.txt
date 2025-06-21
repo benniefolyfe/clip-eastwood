@@ -7,3 +7,4 @@ tenacity
 python-dotenv
 google-generativeai
 certifi
+google-cloud-secret-manager
